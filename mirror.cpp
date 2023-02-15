@@ -1,90 +1,167 @@
-// Step 1: Include necessary headers
-#include <Windows.h>
-#include <Psapi.h>
-#include <DbgHelp.h>
-#include <iostream>
-#include <string>
+#include <windows.h>
+#include <dbghelp.h>
 #include <vector>
 #include <thread>
 #include <mutex>
-#include <chrono>
+#include <condition_variable>
 #include <fstream>
+#include <psapi.h>
+#include <functional>
+#include <future>
+#include <queue>
+#include <tchar.h>
 
-// Step 2: Define the signature of the thread function
-void GenerateMemoryDump(DWORD processId, const std::wstring& outputFileName, int* progress, std::mutex* mutex);
+#ifdef _WIN64
+#pragma comment(lib, "dbghelp.lib")
+#else
+#pragma comment(lib, "dbghelp32.lib")
+#endif
 
-int main(int argc, char* argv[])
-{
-    // Step 3: Parse command line arguments
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <output_file>" << std::endl;
-        return 1;
+const DWORD kPageSize = 4096;
+
+// Thread pool class
+class ThreadPool {
+public:
+    explicit ThreadPool(size_t num_threads)
+        : stop(false)
+    {
+        for (size_t i = 0; i < num_threads; ++i)
+            workers.emplace_back(
+                [this]
+                {
+                    for (;;)
+                    {
+                        std::function<void()> task;
+                        {
+                            std::unique_lock<std::mutex> lock(this->queue_mutex);
+                            this->condition.wait(lock,
+                                [this] { return this->stop || !this->tasks.empty(); });
+                            if (this->stop && this->tasks.empty())
+                                return;
+                            task = std::move(this->tasks.front());
+                            this->tasks.pop();
+                        }
+                        task();
+                    }
+                }
+            );
     }
 
-    std::wstring outputFileName = std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>>().from_bytes(argv[1]);
-
-    // Step 4: Get the process IDs for all running processes
-    DWORD processIds[1024], cbNeeded;
-    if (!EnumProcesses(processIds, sizeof(processIds), &cbNeeded)) {
-        std::cerr << "Failed to enumerate processes" << std::endl;
-        return 1;
-    }
-
-    // Step 5: Determine how many process IDs were returned
-    int numProcesses = cbNeeded / sizeof(DWORD);
-
-    // Step 6: Create a progress counter and display a starting message
-    int progress = 0;
-    std::mutex mutex;
-    std::cout << "Generating memory dumps for " << numProcesses << " processes..." << std::endl;
-
-    // Step 7: Loop through the process IDs and create a thread for each process to write
-    std::vector<std::thread> threads;
-    for (int i = 0; i < numProcesses; i++) {
-        DWORD processId = processIds[i];
-        if (processId != 0) {
-            threads.push_back(std::thread(GenerateMemoryDump, processId, outputFileName, &progress, &mutex));
+    ~ThreadPool()
+    {
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            stop = true;
         }
+        condition.notify_all();
+        for (std::thread &worker : workers)
+            worker.join();
     }
 
-    // Step 8: Wait for all threads to complete
-    for (std::thread& thread : threads) {
-        thread.join();
+    template<class F, class... Args>
+    auto enqueue(F&& f, Args&&... args)
+        -> std::future<typename std::result_of<F(Args...)>::type>
+    {
+        using return_type = typename std::result_of<F(Args...)>::type;
+
+        auto task = std::make_shared<std::packaged_task<return_type()>>(
+            std::bind(std::forward<F>(f), std::forward<Args>(args)...)
+            );
+
+        std::future<return_type> res = task->get_future();
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+
+            if (stop)
+                throw std::runtime_error("enqueue on stopped ThreadPool");
+
+            tasks.emplace([task](){ (*task)(); });
+        }
+        condition.notify_one();
+        return res;
     }
 
-    // Step 9: Display a completion message
-    std::cout << "Memory dumps have been generated in " << std::string(outputFileName.begin(), outputFileName.end()) << std::endl;
+private:
+    std::vector<std::thread> workers;
+    std::queue<std::function<void()>> tasks;
 
-    return 0;
+    std::mutex queue_mutex;
+    std::condition_variable condition;
+    bool stop;
+};
+
+// Function to create a dump file in the standard Windows format
+bool CreateDumpFile(const TCHAR* dumpFilePath, DWORD processId)
+{
+    HANDLE hDumpFile = CreateFile(dumpFilePath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hDumpFile == INVALID_HANDLE_VALUE)
+        return false;
+
+    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processId);
+    if (hProcess == NULL)
+    {
+        CloseHandle(hDumpFile);
+        return false;
+    }
+
+    bool result = MiniDumpWriteDump(hProcess, processId, hDumpFile, MiniDumpWithFullMemory, NULL, NULL, NULL);
+
+    CloseHandle(hProcess);
+    CloseHandle(hDumpFile);
+
+    return result;
 }
 
-void GenerateMemoryDump(DWORD processId, const std::wstring& outputFileName, int* progress, std::mutex* mutex)
+// Function to scan a chunk of process memory and write it to dump file
+void scan_process_memory_chunk(HANDLE process, HANDLE hDumpFile, DWORD address)
 {
-    // Step 10: Open a handle to the process
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
-    if (hProcess == nullptr) {
+    if (address == 0)
         return;
-    }
 
-    // Step 11: Create the output file name
-    std::ofstream outfile(outputFileName, std::ios::out | std::ios::binary | std::ios::app);
+    // Read a page of memory at a time and write it to the dump file
+char buffer[kPageSize];
+SIZE_T bytes_read;
+if (ReadProcessMemory(process, reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), buffer, kPageSize, &bytes_read))
 
-    // Step 12: Create the memory dump
-    BOOL success = MiniDumpWriteDump(hProcess, processId, outfile.handle(), MiniDumpWithFullMemory, NULL, NULL, NULL);
-    if (success) {
-        *mutex.lock();
-        ++(*progress);
-        std::wcout << L"[" << std::wstring(*progress / 10, L'#') << std::wstring(10 - *progress / 10, L' ') << L"] " << *progress << L"% complete" << std::endl;
-        *mutex.unlock();
-    }
-
-CloseHandle(hFile);
-CloseHandle(hProcess);
-
-// Step 13: Lock the mutex and update the progress counter
 {
-    std::lock_guard<std::mutex> lock(*mutex);
-    (*progress)++;
-    double percentComplete = static_cast<double>(*progress) / numProcesses * 100;
-    std::cout << "[" << std::string(percentComplete / 10, '#') << std::string(10 - percentComplete / 10, ' ') << "] " << static_cast<int>(percentComplete) << "% complete" << std::endl;
+    DWORD bytes_written;
+    WriteFile(hDumpFile, buffer, bytes_read, &bytes_written, NULL);
+}
+}
+// Function to scan process memory and write it to dump file
+void scan_process_memory(HANDLE process, const TCHAR* dumpFilePath, DWORD start_address, DWORD end_address)
+{
+HANDLE hDumpFile = CreateFile(dumpFilePath, GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+if (hDumpFile == INVALID_HANDLE_VALUE)
+return;
+// Divide the memory space into chunks and assign each chunk to a worker thread
+DWORD chunk_size = (end_address - start_address) / 4;
+ThreadPool thread_pool(4);
+for (DWORD address = start_address; address < end_address; address += chunk_size)
+{
+    thread_pool.enqueue(scan_process_memory_chunk, process, hDumpFile, address);
+}
+
+CloseHandle(hDumpFile);
+
+// Create a dump file in the standard Windows format
+CreateDumpFile(dumpFilePath, GetProcessId(process));
+}
+int main()
+{
+// Get the minimum and maximum memory addresses used by the process
+SYSTEM_INFO system_info;
+GetSystemInfo(&system_info);
+
+uintptr_t start_address = reinterpret_cast<uintptr_t>(system_info.lpMinimumApplicationAddress);
+uintptr_t end_address = reinterpret_cast<uintptr_t>(system_info.lpMaximumApplicationAddress);
+
+TCHAR dumpFilePath[MAX_PATH];
+GetModuleFileName(NULL, dumpFilePath, MAX_PATH);
+_tcscat_s(dumpFilePath, MAX_PATH, _T(".dmp"));
+
+
+scan_process_memory(GetCurrentProcess(), dumpFilePath, start_address, end_address);
+
+return 0;
 }
