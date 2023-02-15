@@ -1,1 +1,4 @@
 gcc -std=c++17 .\mirror.cpp -o mirror.exe -lstdc++fs -lstdc++ -static-libgcc -static-libstdc++ -lDbgHelp >>> mirror
+pacman -S mingw-w64-x86_64-toolchain
+pacman -S mingw-w64-x86_64-winpthreads
+g++ -static -static-libgcc -static-libstdc++ -o my_program.exe my_program.cpp
