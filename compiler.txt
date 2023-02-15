@@ -1,0 +1,1 @@
+gcc -std=c++17 .\mirror.cpp -o mirror.exe -lstdc++fs -lstdc++ -static-libgcc -static-libstdc++ -lDbgHelp >>> mirror
