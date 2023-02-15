@@ -7,20 +7,21 @@
 #include <vector>
 #include <thread>
 #include <mutex>
-#include <codecvt>
+#include <chrono>
+#include <fstream>
 
 // Step 2: Define the signature of the thread function
-void GenerateMemoryDump(DWORD processId, const std::wstring& outputDirectory, int* progress, std::mutex* mutex);
+void GenerateMemoryDump(DWORD processId, const std::wstring& outputFileName, int* progress, std::mutex* mutex);
 
 int main(int argc, char* argv[])
 {
     // Step 3: Parse command line arguments
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <output_directory>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <output_file>" << std::endl;
         return 1;
     }
 
-    std::wstring outputDirectory = std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>>().from_bytes(argv[1]);
+    std::wstring outputFileName = std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>>().from_bytes(argv[1]);
 
     // Step 4: Get the process IDs for all running processes
     DWORD processIds[1024], cbNeeded;
@@ -42,7 +43,7 @@ int main(int argc, char* argv[])
     for (int i = 0; i < numProcesses; i++) {
         DWORD processId = processIds[i];
         if (processId != 0) {
-            threads.push_back(std::thread(GenerateMemoryDump, processId, outputDirectory, &progress, &mutex));
+            threads.push_back(std::thread(GenerateMemoryDump, processId, outputFileName, &progress, &mutex));
         }
     }
 
@@ -52,28 +53,38 @@ int main(int argc, char* argv[])
     }
 
     // Step 9: Display a completion message
-    std::cout << "Memory dumps have been generated in " << std::string(outputDirectory.begin(), outputDirectory.end()) << std::endl;
+    std::cout << "Memory dumps have been generated in " << std::string(outputFileName.begin(), outputFileName.end()) << std::endl;
 
     return 0;
 }
 
-// Step 10: Define the GenerateMemoryDump function
-void GenerateMemoryDump(DWORD processId, const std::wstring& outputDirectory, int* progress, std::mutex* mutex)
+void GenerateMemoryDump(DWORD processId, const std::wstring& outputFileName, int* progress, std::mutex* mutex)
 {
-    // Step 11: Open a handle to the process
+    // Step 10: Open a handle to the process
     HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
     if (hProcess == nullptr) {
         return;
     }
 
-    // Step 12: Get the process name
-    WCHAR processName[MAX_PATH] = { 0 };
-    DWORD processNameLength = MAX_PATH;
-    QueryFullProcessImageNameW(hProcess, 0, processName, &processNameLength);
-    std::wstring processNameStr(processName);
+    // Step 11: Create the output file name
+    std::ofstream outfile(outputFileName, std::ios::out | std::ios::binary | std::ios::app);
 
-    // Step 13: Create the output file name
-    std::wstring outputFileName = outputDirectory + L"\\" + std::to_wstring(processId) + L"_" + processNameStr.substr(processNameStr.rfind(L"\\") + 1) + L".dmp";
+    // Step 12: Create the memory dump
+    BOOL success = MiniDumpWriteDump(hProcess, processId, outfile.handle(), MiniDumpWithFullMemory, NULL, NULL, NULL);
+    if (success) {
+        *mutex.lock();
+        ++(*progress);
+        std::wcout << L"[" << std::wstring(*progress / 10, L'#') << std::wstring(10 - *progress / 10, L' ') << L"] " << *progress << L"% complete" << std::endl;
+        *mutex.unlock();
+    }
 
-    // Step 14: Create the memory dump
-    HANDLE hFile = CreateFileW(outputFileName.c_str(), GENERIC_WRITE, 0, NULL, CREATE
+CloseHandle(hFile);
+CloseHandle(hProcess);
+
+// Step 13: Lock the mutex and update the progress counter
+{
+    std::lock_guard<std::mutex> lock(*mutex);
+    (*progress)++;
+    double percentComplete = static_cast<double>(*progress) / numProcesses * 100;
+    std::cout << "[" << std::string(percentComplete / 10, '#') << std::string(10 - percentComplete / 10, ' ') << "] " << static_cast<int>(percentComplete) << "% complete" << std::endl;
+}
