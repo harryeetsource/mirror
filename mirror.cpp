@@ -10,6 +10,7 @@
 #include <future>
 #include <queue>
 #include <tchar.h>
+#include <iostream>
 
 #ifdef _WIN64
 #pragma comment(lib, "dbghelp.lib")
@@ -129,39 +130,57 @@ if (ReadProcessMemory(process, reinterpret_cast<LPVOID>(static_cast<uintptr_t>(a
 }
 }
 // Function to scan process memory and write it to dump file
-void scan_process_memory(HANDLE process, const TCHAR* dumpFilePath, DWORD start_address, DWORD end_address)
+void scan_process_memory(HANDLE process, const TCHAR* const dumpFilePath, DWORD start_address, DWORD end_address, ThreadPool& thread_pool)
 {
-HANDLE hDumpFile = CreateFile(dumpFilePath, GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-if (hDumpFile == INVALID_HANDLE_VALUE)
-return;
-// Divide the memory space into chunks and assign each chunk to a worker thread
-DWORD chunk_size = (end_address - start_address) / 4;
-ThreadPool thread_pool(4);
-for (DWORD address = start_address; address < end_address; address += chunk_size)
-{
-    thread_pool.enqueue(scan_process_memory_chunk, process, hDumpFile, address);
+    // Divide the memory space into chunks and assign each chunk to a worker thread
+    DWORD chunk_size = (end_address - start_address) / 4;
+    for (DWORD address = start_address; address < end_address; address += chunk_size)
+    {
+        thread_pool.enqueue(scan_process_memory_chunk, process, (void*)dumpFilePath, address);
+
+    }
 }
 
-CloseHandle(hDumpFile);
+int _tmain(int argc, TCHAR* argv[]) {
+    if (argc < 2) {
+        std::cerr << "Usage: mirror <dump_file_path>\n";
+        return 1;
+    }
 
-// Create a dump file in the standard Windows format
-CreateDumpFile(dumpFilePath, GetProcessId(process));
+   // Convert command-line argument to dump file path to wide string
+    TCHAR dumpFilePath[MAX_PATH];
+    size_t size = strlen(argv[1]) + 1;
+    MultiByteToWideChar(CP_UTF8, 0, argv[1], -1, reinterpret_cast<LPWSTR>(dumpFilePath), size);
+
+
+
+    // Get system information
+    SYSTEM_INFO system_info;
+    GetSystemInfo(&system_info);
+
+    // Calculate memory chunk size
+    size_t chunk_size = 256 * 1024 * 1024;  // 256 MB
+
+    // Create a thread pool with 8 worker threads
+    ThreadPool thread_pool(8);
+
+    // Iterate over all memory chunks and scan them in parallel
+    uintptr_t start_address = reinterpret_cast<uintptr_t>(system_info.lpMinimumApplicationAddress);
+    uintptr_t end_address = reinterpret_cast<uintptr_t>(system_info.lpMaximumApplicationAddress);
+    while (start_address < end_address) {
+        uintptr_t chunk_end_address = start_address + chunk_size;
+        if (chunk_end_address > end_address) {
+            chunk_end_address = end_address;
+        }
+        scan_process_memory(GetCurrentProcess(), dumpFilePath, start_address, chunk_end_address, thread_pool);
+        start_address = chunk_end_address;
+    }
+
+    return 0;
 }
-int main()
-{
-// Get the minimum and maximum memory addresses used by the process
-SYSTEM_INFO system_info;
-GetSystemInfo(&system_info);
-
-uintptr_t start_address = reinterpret_cast<uintptr_t>(system_info.lpMinimumApplicationAddress);
-uintptr_t end_address = reinterpret_cast<uintptr_t>(system_info.lpMaximumApplicationAddress);
-
-TCHAR dumpFilePath[MAX_PATH];
-GetModuleFileName(NULL, dumpFilePath, MAX_PATH);
-_tcscat_s(dumpFilePath, MAX_PATH, _T(".dmp"));
 
 
-scan_process_memory(GetCurrentProcess(), dumpFilePath, start_address, end_address);
 
-return 0;
-}
+
+
+
