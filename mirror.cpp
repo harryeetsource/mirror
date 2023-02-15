@@ -1,81 +1,79 @@
+// Step 1: Include necessary headers
 #include <Windows.h>
-#include <iostream>
-#include <vector>
-#include <psapi.h>
+#include <Psapi.h>
 #include <DbgHelp.h>
-using namespace std;
+#include <iostream>
+#include <string>
+#include <vector>
+#include <thread>
+#include <mutex>
+#include <codecvt>
 
-// A function that generates a memory dump file for a specified process.
-void GenerateMemoryDump(DWORD* processId)
+// Step 2: Define the signature of the thread function
+void GenerateMemoryDump(DWORD processId, const std::wstring& outputDirectory, int* progress, std::mutex* mutex);
+
+int main(int argc, char* argv[])
 {
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, *processId);
-    if (hProcess == NULL) {
-        cerr << "Error: Unable to open process with ID " << *processId << endl;
-        return;
-    }
-
-    // Get the process name.
-    WCHAR processName[MAX_PATH];
-    if (GetModuleFileNameExW(hProcess, NULL, processName, MAX_PATH) == 0) {
-        cerr << "Error: Unable to get process name for process with ID " << *processId << endl;
-        CloseHandle(hProcess);
-        return;
-    }
-
-    // Generate the memory dump file.
-    HANDLE hFile = CreateFileW(processName, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        cerr << "Error: Unable to create memory dump file for process with ID " << *processId << endl;
-        CloseHandle(hProcess);
-        return;
-    }
-
-    if (!MiniDumpWriteDump(hProcess, *processId, hFile, MiniDumpNormal, NULL, NULL, NULL)) {
-        cerr << "Error: Unable to generate memory dump for process with ID " << *processId << endl;
-        CloseHandle(hFile);
-        CloseHandle(hProcess);
-        return;
-    }
-
-    wcout << L"Generated memory dump for process with ID " << *processId << endl;
-
-    CloseHandle(hFile);
-    CloseHandle(hProcess);
-}
-
-int main()
-{
-    // Get the IDs of all processes.
-    DWORD processes[1024];
-    DWORD bytesReturned;
-    if (!EnumProcesses(processes, sizeof(processes), &bytesReturned)) {
-        cerr << "Error: Unable to enumerate processes" << endl;
+    // Step 3: Parse command line arguments
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <output_directory>" << std::endl;
         return 1;
     }
 
-    // Calculate the number of processes.
-    DWORD numProcesses = bytesReturned / sizeof(DWORD);
+    std::wstring outputDirectory = std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>>().from_bytes(argv[1]);
 
-    // Create a thread pool to generate memory dumps.
-    const DWORD poolSize = 8;
-    HANDLE threadPool[poolSize];
-    vector<DWORD> processIds;
-
-    for (DWORD i = 0; i < numProcesses; i++) {
-        processIds.push_back(processes[i]);
+    // Step 4: Get the process IDs for all running processes
+    DWORD processIds[1024], cbNeeded;
+    if (!EnumProcesses(processIds, sizeof(processIds), &cbNeeded)) {
+        std::cerr << "Failed to enumerate processes" << std::endl;
+        return 1;
     }
 
-    for (DWORD i = 0; i < poolSize; i++) {
-        threadPool[i] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)GenerateMemoryDump, (LPVOID)&processIds[i], 0, NULL);
+    // Step 5: Determine how many process IDs were returned
+    int numProcesses = cbNeeded / sizeof(DWORD);
+
+    // Step 6: Create a progress counter and display a starting message
+    int progress = 0;
+    std::mutex mutex;
+    std::cout << "Generating memory dumps for " << numProcesses << " processes..." << std::endl;
+
+    // Step 7: Loop through the process IDs and create a thread for each process to write
+    std::vector<std::thread> threads;
+    for (int i = 0; i < numProcesses; i++) {
+        DWORD processId = processIds[i];
+        if (processId != 0) {
+            threads.push_back(std::thread(GenerateMemoryDump, processId, outputDirectory, &progress, &mutex));
+        }
     }
 
-    // Wait for all threads to finish.
-    WaitForMultipleObjects(poolSize, threadPool, TRUE, INFINITE);
-
-    // Clean up the thread pool.
-    for (DWORD i = 0; i < poolSize; i++) {
-        CloseHandle(threadPool[i]);
+    // Step 8: Wait for all threads to complete
+    for (std::thread& thread : threads) {
+        thread.join();
     }
+
+    // Step 9: Display a completion message
+    std::cout << "Memory dumps have been generated in " << std::string(outputDirectory.begin(), outputDirectory.end()) << std::endl;
 
     return 0;
 }
+
+// Step 10: Define the GenerateMemoryDump function
+void GenerateMemoryDump(DWORD processId, const std::wstring& outputDirectory, int* progress, std::mutex* mutex)
+{
+    // Step 11: Open a handle to the process
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
+    if (hProcess == nullptr) {
+        return;
+    }
+
+    // Step 12: Get the process name
+    WCHAR processName[MAX_PATH] = { 0 };
+    DWORD processNameLength = MAX_PATH;
+    QueryFullProcessImageNameW(hProcess, 0, processName, &processNameLength);
+    std::wstring processNameStr(processName);
+
+    // Step 13: Create the output file name
+    std::wstring outputFileName = outputDirectory + L"\\" + std::to_wstring(processId) + L"_" + processNameStr.substr(processNameStr.rfind(L"\\") + 1) + L".dmp";
+
+    // Step 14: Create the memory dump
+    HANDLE hFile = CreateFileW(outputFileName.c_str(), GENERIC_WRITE, 0, NULL, CREATE
